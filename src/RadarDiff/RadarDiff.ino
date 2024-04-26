@@ -64,7 +64,7 @@ void loop() {
     
     float maxInd;
     float maxVal;
-    int dcRange = 1;
+    int dcRange = 5;
     // Remove DC
     for (int i = 0; i < dcRange; i++) {
       samples[i] = 0;
@@ -81,7 +81,7 @@ void loop() {
     PrintVector(samples, ind_thresh, SCL_INDEX, &maxInd, &maxVal);
     
 
-    float valThresh = 400;
+    float valThresh = 500;
     float valMin = 0;
     volatile float peak_ind[indSize] = {};
     if (maxVal > valThresh) {
