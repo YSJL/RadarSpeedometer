@@ -1,8 +1,10 @@
+//Normalize Ouput
+
 #include <arduinoFFT.h>
 #include <TimerOne.h>
 
 // Define the ADC midpoint (512 is the default)
-#define ADC_MIDPOINT 256
+#define ADC_MIDPOINT 512
 
 // Define the sample rate (8800 S/s is the default for 16 MHz Boards)
 #define SAMPLE_RATE 8800
@@ -10,22 +12,31 @@
 //Diff
 unsigned long last_millis = 0; // keep track of the last time we read the ADC
 const uint16_t sampleSize = 512;
+const uint8_t  ind_thresh = 128;
+const uint8_t  indSize = 16;
+float prev = 0;
 volatile int i = 0;
-volatile double samples[sampleSize] = {};
+volatile float samples[sampleSize] = {};
+// volatile int j = 0;
+// volatile float samples_B[sampleSize] = {};
 volatile short sample;
+uint16_t peak_ind_idx = 0;
 bool dataReady = false;
 bool bufferReady = false;
+bool fftPrint = true;
 
-//FFT
-const double samplingFrequency = 8800;
-double vImag[sampleSize];
-
-ArduinoFFT<double> FFT = ArduinoFFT<double>(samples, vImag, sampleSize, samplingFrequency);
+/* Create FFT object */
+const float samplingFrequency = (float) SAMPLE_RATE;
 
 #define SCL_INDEX 0x00
 #define SCL_TIME 0x01
 #define SCL_FREQUENCY 0x02
 #define SCL_PLOT 0x03
+
+typedef union {
+  float floatingPoint;
+  byte binary[4];
+} binaryFloat;
 
 void setup() {
   Serial.begin(115200); // Use a faster baud rate so we can print faster
@@ -40,31 +51,84 @@ void setup() {
   last_millis = millis(); // record a starting timestamp
 }
 
-void loop() {  
+void loop() {
   if (bufferReady) {
-    for(int j = 0; j < sampleSize; j++) {
-      //Serial.println(samples[j]);
-      vImag[j] = 0.0; 
-    }
-    bufferReady = false;
-    /* Print the results of the simulated sampling according to time */
-    Serial.println("Data:");
-    PrintVector(samples, sampleSize, SCL_TIME);
+    // for(int j = 0; j < sampleSize; j++) {
+    //   Serial.println(samples[j]);
+    // }
+    float vImag[sampleSize] = {};
+    ArduinoFFT<float> FFT = ArduinoFFT<float>(samples, vImag, sampleSize, samplingFrequency);
     FFT.windowing(FFTWindow::Hamming, FFTDirection::Forward);	/* Weigh data */
-    Serial.println("Weighed data:");
-    PrintVector(samples, sampleSize, SCL_TIME);
     FFT.compute(FFTDirection::Forward); /* Compute FFT */
-    Serial.println("Computed Real values:");
-    PrintVector(samples, sampleSize, SCL_INDEX);
-    Serial.println("Computed Imaginary values:");
-    PrintVector(vImag, sampleSize, SCL_INDEX);
     FFT.complexToMagnitude(); /* Compute magnitudes */
-    Serial.println("Computed magnitudes:");
-    PrintVector(samples, (sampleSize >> 1), SCL_FREQUENCY);
-    double x = FFT.majorPeak();
-    Serial.println(x, 6);
+    
+    float maxInd;
+    float maxVal;
+    int dcRange = 1;
+    // Remove DC
+    for (int i = 0; i < dcRange; i++) {
+      samples[i] = 0;
+    }
+    // samples[8] = 0;
+    // Serial.println(samples[1]);
+
+    // for(int j = 0; j < ind_thresh; j++) {
+    //   Serial.print(j);
+    //   Serial.print(' ');
+    //   Serial.println(samples[j]);
+    // }
+    
+    PrintVector(samples, ind_thresh, SCL_INDEX, &maxInd, &maxVal);
+    
+
+    float valThresh = 400;
+    float valMin = 0;
+    volatile float peak_ind[indSize] = {};
+    if (maxVal > valThresh) {
+    //if (maxVal < valThresh && maxVal > valMin) {
+      peak_ind[peak_ind_idx++] = maxInd;
+    } else {
+      peak_ind[peak_ind_idx++] = 0;
+    }
+
+    if (peak_ind_idx == indSize) {
+      peak_ind_idx = 0;
+    }
+
+    float cumul = 0;
+    uint8_t valid_samples = 0;
+    for (uint8_t i = 0; i < indSize; i++) {
+      if (peak_ind[i] != 0) {
+        cumul += (float)peak_ind[i];
+        valid_samples++;
+      }
+    }
+
+    float max_freq = 0;
+    if (valid_samples != 0) {
+      max_freq = cumul/valid_samples;
+    } else {
+      max_freq = 0;
+    }
+    max_freq = max_freq * samplingFrequency / sampleSize;
+    float speed = ((uint16_t)max_freq)*(0.0125/2)*(3600/1000);
+    binaryFloat send;
+    send.floatingPoint = speed;
+    Serial.write('\n');
+    Serial.write(send.binary, 4);
+    // Serial.print(maxInd);
+    // Serial.print(' ');
+    // Serial.print(maxVal);
+    // Serial.print(' ');
+    // Serial.print(max_freq);
+    // Serial.print(' ');
+    // Serial.print(speed);
+    // Serial.print('\n');
+    // if (speed < 40) {
+    //   Serial.println((prev + speed)/2);
+    // }
+    bufferReady = false;
   }
-  delay(100);
 }
 
 // Sets up the ADC to run in differential mode
@@ -80,7 +144,7 @@ void read_differential_setup() {
 void read_differential_start() {
   // set MUX5:0 to 001001. Positive Differential Input => ADC0 and 
   // Negative Differential Input => ADC1 with Gain 10x.
-  ADMUX |= (1<<MUX3) | (1<<MUX0);// | (1<<MUX1);
+  ADMUX |= (1<<MUX3) | (1<<MUX0) | (1<<MUX1);
   // start conversion
   ADCSRA |= (1<<ADSC);            
 }
@@ -111,15 +175,17 @@ void get_sample(void) {
   //Serial.println("Get_Sample");
   read_differential_start(); // Reads the value from the ADC
   //last_millis = millis();        // Record the time we're starting this sample
-  dataReady = 1;
   //Serial.println(dataReady);
 }
 
-void PrintVector(double *vData, uint16_t bufferSize, uint8_t scaleType)
+float PrintVector(float *vData, uint16_t bufferSize, uint8_t scaleType, float *m_ind, float *m_val)
 {
-  for (uint16_t i = 0; i < bufferSize; i++)
+  float max = 0;
+  float m_abscissa = 0;
+  int ind_start = 0;
+  for (uint16_t i = ind_start; i < bufferSize; i++)
   {
-    double abscissa;
+    float abscissa;
     /* Print abscissa value */
     switch (scaleType)
     {
@@ -133,24 +199,37 @@ void PrintVector(double *vData, uint16_t bufferSize, uint8_t scaleType)
         abscissa = ((i * 1.0 * samplingFrequency) / sampleSize);
 	break;
     }
-    Serial.print(abscissa, 6);
-    if(scaleType==SCL_FREQUENCY)
-      Serial.print("Hz");
-    Serial.print(" ");
-    Serial.println(vData[i], 4);
+    if (vData[i] > max) {
+    //if (vData[i] > max && vData[i] > 60) {
+      max = vData[i];
+      m_abscissa = abscissa;
+    }
+    // Serial.print(abscissa, 6);
+    // if(scaleType==SCL_FREQUENCY)
+    //   Serial.print("Hz");
+    // Serial.print(" ");
+    // // Serial.print(i == ind_start ? 2000 : 0);
+    // // Serial.print(" ");
+    // Serial.println(vData[i], 4);
   }
-  Serial.println();
+  // Serial.println(max);
+  // Serial.print(" ");
+  *m_val = max;
+  *m_ind = m_abscissa;
 }
-
+int temp = 0;
 // ADC Interrupt Service Routine (ISR)
 ISR(ADC_vect) {
   // in this example we are polling in the loop(), so nothing to do here
   // we don't need read_differential_status() in the ISR because we know it is done
-  if(dataReady) {
-    //Serial.println(i);
-    dataReady = false;
+  
+  if (bufferReady == 0) {
     samples[i++] = read_differential_value();
-    i == sampleSize ? bufferReady = 1 : bufferReady = 0;
-    i > sampleSize ? i = 0 :i=i ;
+  }
+  if (i == sampleSize) {
+    bufferReady = 1;
+  }
+  if (i >= sampleSize) {
+    i = 0;
   }
 }
